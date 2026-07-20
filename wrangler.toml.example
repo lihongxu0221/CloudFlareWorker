@@ -1,0 +1,26 @@
+name = "grokreg-mail"
+main = "grokreg.worker.js"
+compatibility_date = "2024-11-01"
+
+# 非敏感配置可写在 [vars]；账号/授权码请用 wrangler secret 注入
+[vars]
+DOMAIN = "mail.example.com"
+QQ_MAIL_HOST = "pop.qq.com"
+QQ_MAIL_PORT = "995"
+QQ_IMAP_HOST = "imap.qq.com"
+QQ_IMAP_PORT = "993"
+# 默认开启 IMAP 删信（QQ 网页端同步删除）；仅 POP3 时设为 "0"
+# QQ_IMAP_DELETE = "0"
+QQ_FETCH_LIMIT = "20"
+# 并发多账号注册时建议取消下一行注释
+# QQ_STRICT_ALIAS_MATCH = "1"
+
+# 以下密钥不要写进本文件，部署前执行：
+#   wrangler secret put QQ_MAIL_USER
+#   wrangler secret put QQ_MAIL_AUTH_CODE
+#
+# 兼容别名（二选一即可，与 Worker 代码一致）：
+#   QQ_MAIL_USER      ≡ QQ_MAIL_ACCOUNT
+#   QQ_MAIL_AUTH_CODE ≡ QQ_MAIL_PASSWORD
+#   QQ_IMAP_HOST      ≡ IMAP_HOST
+#   QQ_IMAP_PORT      ≡ IMAP_PORT
