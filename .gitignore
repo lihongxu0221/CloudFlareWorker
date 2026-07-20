@@ -70,8 +70,7 @@ web_modules/
 .env.*
 !.env.example
 
-# Local Wrangler config (use wrangler.toml.example as template)
-wrangler.toml
+# Local secrets only (wrangler.toml 可提交，勿写入授权码)
 .dev.vars
 
 # parcel-bundler cache (https://parceljs.org/)
