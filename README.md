@@ -400,8 +400,12 @@ console.log(created.address, mails.messages);
 ### 3. POP3 握手失败 / USER/PASS 失败
 
 - 确认已开启 POP3 服务
-- 确认使用的是授权码
+- 确认使用的是授权码（非登录密码）
 - 检查 `QQ_MAIL_HOST` / `QQ_MAIL_PORT` 是否为 `pop.qq.com` / `995`
+- **Windows**：PowerShell 管道 `$code | wrangler secret put` 可能把授权码写坏（丢 stdin / 多 `\r\n`）。请用 `.\deploy.ps1`（已修复）或交互式：
+  ```powershell
+  npx wrangler@4 secret put QQ_MAIL_AUTH_CODE
+  ```
 
 ### 4. 有邮件但列表为空
 

@@ -165,22 +165,78 @@ function Invoke-Wrangler {
   }
 }
 
+function Normalize-SecretValue {
+  param([string]$Value)
+  if ($null -eq $Value) { return "" }
+  $v = $Value.Trim()
+  # 去掉用户误加的引号 / 管道残留换行
+  if (($v.Length -ge 2) -and (
+      ($v.StartsWith('"') -and $v.EndsWith('"')) -or
+      ($v.StartsWith("'") -and $v.EndsWith("'"))
+    )) {
+    $v = $v.Substring(1, $v.Length - 2).Trim()
+  }
+  $v = $v -replace "[\r\n]+$", ""
+  return $v
+}
+
+function Invoke-WranglerSecretPut {
+  param(
+    [string]$Name,
+    [string]$Value
+  )
+  # PowerShell 的 `$Value | wrangler secret put` 在 Windows 上不可靠：
+  # 1) 管道到 .cmd 时 stdin 常丢失；2) 可能附带 \r\n，导致 QQ 授权码鉴权失败。
+  # 经 cmd.exe 重定向 stdin，且只写原始值、不追加换行。
+  $useNpx = -not (Test-CommandExists "wrangler")
+  $inner = if ($useNpx) {
+    "npx --yes wrangler@4 secret put $Name"
+  } else {
+    "wrangler secret put $Name"
+  }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $env:ComSpec
+  $psi.Arguments = "/d /c $inner"
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $false
+  $psi.RedirectStandardError = $false
+  $psi.CreateNoWindow = $false
+  $psi.WorkingDirectory = $Root
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  # 写入值 + 单个 \n（兼容 wrangler readline）；Worker 端会对 secret 做 trim
+  # 切勿用 PowerShell 管道（常丢 stdin 或附带 \r\n 脏数据）
+  $proc.StandardInput.Write($Value + "`n")
+  $proc.StandardInput.Close()
+  $proc.WaitForExit()
+  if ($proc.ExitCode -ne 0) {
+    throw ("secret put 失败: " + $Name + " exit " + $proc.ExitCode)
+  }
+}
+
 function Set-WranglerSecret {
   param(
     [string]$Name,
     [string]$Value
   )
-  if ([string]::IsNullOrWhiteSpace($Value)) {
+  $clean = Normalize-SecretValue $Value
+  if ([string]::IsNullOrWhiteSpace($clean)) {
     throw ("密钥不能为空: " + $Name)
   }
-  if (Test-CommandExists "wrangler") {
-    $Value | & wrangler secret put $Name
+  if ($clean -ne $Value) {
+    Write-Warn ("$Name 已去除首尾空白/引号/换行（原长度 $($Value.Length) → $($clean.Length)）")
+  }
+  # 授权码只提示长度，不回显内容
+  if ($Name -match "AUTH|PASSWORD|CODE") {
+    Write-Host ("    写入 $Name （长度 $($clean.Length)）") -ForegroundColor DarkGray
   } else {
-    $Value | & npx --yes wrangler@4 secret put $Name
+    Write-Host ("    写入 $Name") -ForegroundColor DarkGray
   }
-  if ($LASTEXITCODE -ne 0) {
-    throw ("secret put 失败: " + $Name + " exit " + $LASTEXITCODE)
-  }
+  Invoke-WranglerSecretPut -Name $Name -Value $clean
 }
 
 Write-Host ""
@@ -275,8 +331,16 @@ if (-not $SkipSecrets) {
   if ([string]::IsNullOrWhiteSpace($QqAuthCode)) {
     $QqAuthCode = Get-InputValue -Prompt "QQ 邮箱授权码 QQ_MAIL_AUTH_CODE" -Secret
   }
+  $QqUser = Normalize-SecretValue $QqUser
+  $QqAuthCode = Normalize-SecretValue $QqAuthCode
   if ([string]::IsNullOrWhiteSpace($QqUser)) { throw "QQ_MAIL_USER 不能为空" }
   if ([string]::IsNullOrWhiteSpace($QqAuthCode)) { throw "QQ_MAIL_AUTH_CODE 不能为空" }
+  if ($QqAuthCode -match "[\r\n]") {
+    throw "QQ_MAIL_AUTH_CODE 含有换行，请重新输入（勿粘贴多行）"
+  }
+  if ($QqAuthCode.Length -lt 6) {
+    throw "QQ_MAIL_AUTH_CODE 长度过短（$($QqAuthCode.Length)），请确认是授权码而非登录密码"
+  }
 }
 
 if (-not $StrictAlias -and $env:QQ_STRICT_ALIAS_MATCH -eq "1") {
@@ -329,12 +393,15 @@ if ($SkipDeploy) {
 }
 
 Write-Step "执行 wrangler deploy"
+Write-Host "    若线上 Worker 曾在控制台编辑，将自动确认覆盖" -ForegroundColor DarkGray
 $deployLog = Join-Path $env:TEMP ("grokreg-deploy-" + (Get-Date -Format "yyyyMMddHHmmss") + ".log")
 try {
+  # 用 cmd 管道喂 y：覆盖此前通过 Dashboard/script API 上传的 Worker
+  # （PowerShell 管道在部分环境下不会把 y 传给原生交互提示）
   if (Test-CommandExists "wrangler") {
-    & wrangler deploy 2>&1 | Tee-Object -FilePath $deployLog
+    cmd /c "echo y| wrangler deploy" 2>&1 | Tee-Object -FilePath $deployLog
   } else {
-    & npx --yes wrangler@4 deploy 2>&1 | Tee-Object -FilePath $deployLog
+    cmd /c "echo y| npx --yes wrangler@4 deploy" 2>&1 | Tee-Object -FilePath $deployLog
   }
   if ($LASTEXITCODE -ne 0) { throw ("deploy 失败 exit " + $LASTEXITCODE) }
 } catch {
@@ -342,6 +409,7 @@ try {
   if (Test-Path $deployLog) {
     Write-Host ("    日志: " + $deployLog) -ForegroundColor Yellow
   }
+  Write-Host "    也可手动执行: npx wrangler@4 deploy  （提示时输入 y）" -ForegroundColor Yellow
   exit 1
 }
 Write-Ok "部署命令已执行"

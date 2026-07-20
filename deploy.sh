@@ -97,6 +97,23 @@ run_wrangler() {
   fi
 }
 
+# 去掉首尾空白、误加引号、内部换行（避免 secret put 写入脏授权码）
+normalize_secret() {
+  local v="${1-}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ "$v" == \"*\" || "$v" == \'*\' ]]; then
+      v="${v:1:${#v}-2}"
+      v="${v#"${v%%[![:space:]]*}"}"
+      v="${v%"${v##*[![:space:]]}"}"
+    fi
+  fi
+  v="${v//$'\r'/}"
+  v="${v//$'\n'/}"
+  printf '%s' "$v"
+}
+
 update_wrangler_toml() {
   local path="$1"
   local name="$2"
@@ -216,8 +233,14 @@ if [[ "$SKIP_SECRETS" -eq 0 ]]; then
   if [[ -z "$QQ_MAIL_AUTH_CODE" ]]; then
     QQ_MAIL_AUTH_CODE="$(prompt "QQ 邮箱授权码 QQ_MAIL_AUTH_CODE" "" 1)"
   fi
+  QQ_MAIL_USER="$(normalize_secret "$QQ_MAIL_USER")"
+  QQ_MAIL_AUTH_CODE="$(normalize_secret "$QQ_MAIL_AUTH_CODE")"
   [[ -n "$QQ_MAIL_USER" ]] || { fail "QQ_MAIL_USER 不能为空"; exit 1; }
   [[ -n "$QQ_MAIL_AUTH_CODE" ]] || { fail "QQ_MAIL_AUTH_CODE 不能为空"; exit 1; }
+  if [[ ${#QQ_MAIL_AUTH_CODE} -lt 6 ]]; then
+    fail "QQ_MAIL_AUTH_CODE 长度过短（${#QQ_MAIL_AUTH_CODE}），请确认是授权码而非登录密码"
+    exit 1
+  fi
 fi
 
 if [[ "$STRICT_ALIAS" -eq 0 && "$YES" -eq 0 ]]; then
@@ -250,8 +273,11 @@ ok "已写入 name / DOMAIN$([ "$STRICT_ALIAS" -eq 1 ] && echo ' / QQ_STRICT_ALI
 
 if [[ "$SKIP_SECRETS" -eq 0 ]]; then
   step "注入 Secrets"
+  # printf '%s' 不写尾部换行，避免授权码变成 "xxxx\n"
+  echo "    写入 QQ_MAIL_USER"
   printf '%s' "$QQ_MAIL_USER" | run_wrangler secret put QQ_MAIL_USER
   ok "QQ_MAIL_USER"
+  echo "    写入 QQ_MAIL_AUTH_CODE（长度 ${#QQ_MAIL_AUTH_CODE}，不回显）"
   printf '%s' "$QQ_MAIL_AUTH_CODE" | run_wrangler secret put QQ_MAIL_AUTH_CODE
   ok "QQ_MAIL_AUTH_CODE"
 else
@@ -265,14 +291,17 @@ if [[ "$SKIP_DEPLOY" -eq 1 ]]; then
 fi
 
 step "执行 wrangler deploy"
+echo "    若线上 Worker 曾在控制台编辑，将自动确认覆盖"
 DEPLOY_LOG="$(mktemp)"
 set +e
-run_wrangler deploy 2>&1 | tee "$DEPLOY_LOG"
-DEPLOY_RC=${PIPESTATUS[0]}
+# 自动回答 y：覆盖此前通过 Dashboard/script API 上传的 Worker
+printf 'y\n' | run_wrangler deploy 2>&1 | tee "$DEPLOY_LOG"
+DEPLOY_RC=${PIPESTATUS[1]:-${PIPESTATUS[0]}}
 set -e
 if [[ $DEPLOY_RC -ne 0 ]]; then
   fail "deploy 失败 (exit $DEPLOY_RC)"
   echo "    日志: $DEPLOY_LOG"
+  echo "    也可手动执行: npx wrangler@4 deploy  （提示时输入 y）"
   exit 1
 fi
 ok "部署命令已执行"
