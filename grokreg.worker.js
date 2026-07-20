@@ -1,5 +1,22 @@
 import { connect } from "cloudflare:sockets";
 
+/**
+ * @typedef {Object} ImapDeleteResult
+ * @property {boolean} ok
+ * @property {number} deleted
+ * @property {Array<{uid?: string, protocol?: string}>} messages
+ * @property {string} error
+ *
+ * @typedef {Object} Pop3DeleteResult
+ * @property {boolean} ok
+ * @property {number} deleted
+ *
+ * @typedef {Object} DeleteResult
+ * @property {Array<Record<string, unknown>>} messages
+ * @property {Pop3DeleteResult} pop3
+ * @property {ImapDeleteResult} imap
+ */
+
 const DEFAULT_POP3_HOST = "pop.qq.com";
 const DEFAULT_POP3_PORT = 995;
 const DEFAULT_IMAP_HOST = "imap.qq.com";
@@ -18,6 +35,12 @@ function jsonResponse(data, status = 200) {
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     },
   });
+}
+
+/** @param {unknown} error */
+function errorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 function normalizePath(pathname) {
@@ -87,7 +110,12 @@ function decodeBytes(bytes, charset = "utf-8") {
 
 function decodeBase64(text, charset = "utf-8") {
   const binary = atob(String(text || "").replace(/\s+/g, ""));
-  return decodeBytes(Uint8Array.from(binary, (char) => char.charCodeAt(0)), charset);
+  // 不用 Uint8Array.from(string, map) — TS 会把 map 参数推断为 number，触发 TS2339
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i) & 0xff;
+  }
+  return decodeBytes(bytes, charset);
 }
 
 function decodeQuotedPrintable(text, charset = "utf-8") {
@@ -389,7 +417,7 @@ async function withPop3(env, callback, { commitRequired = false } = {}) {
 
   if (callbackError) throw callbackError;
   if (commitRequired && quitError) {
-    throw new Error(`POP3 删除未提交(QUIT 失败): ${quitError.message || quitError}`);
+    throw new Error(`POP3 删除未提交(QUIT 失败): ${errorMessage(quitError)}`);
   }
   return result;
 }
@@ -499,6 +527,7 @@ async function withImap(env, callback) {
  * 通过 IMAP 在服务器上真正删除邮件，使 QQ 网页端同步消失。
  * 优先用 Message-ID 匹配；若无则用主题精确匹配。
  * QQ 网页端走 IMAP 存储，仅 POP3 DELE 往往只影响 POP 视图，网页仍可见。
+ * @returns {Promise<ImapDeleteResult>}
  */
 async function deleteMessagesViaImap(env, { messageIds = [], subjects = [] } = {}) {
   const wantMsgIds = [...new Set(messageIds.map((item) => String(item || "").trim()).filter(Boolean))];
@@ -644,6 +673,7 @@ async function deleteMessagesViaPop3(env, aliasAddress, detailId) {
       const selected = detailId
         ? entries.filter((item) => String(item.id) === detailId || String(item.number) === detailId)
         : entries;
+      /** @type {Array<{ id: string, number: number, subject: string, messageId: string, protocol: string }>} */
       const deleted = [];
 
       for (const entry of selected) {
@@ -664,7 +694,7 @@ async function deleteMessagesViaPop3(env, aliasAddress, detailId) {
           deleted.push({
             id: String(entry.id),
             number: entry.number,
-            subject: message.subject,
+            subject: String(message.subject || ""),
             // 仅使用真实 MIME Message-ID；勿回退到 POP3 UIDL（IMAP 搜不到）
             messageId: extractMimeMessageId(raw),
             protocol: "pop3",
@@ -684,10 +714,13 @@ async function deleteMessagesViaPop3(env, aliasAddress, detailId) {
  * 2) IMAP STORE+EXPUNGE（真正从 QQ 服务器删除，网页端同步消失）
  *
  * 仅 POP3 时 QQ 网页端常仍可见（服务器保留副本 / POP 与网页不同步）。
+ *
+ * @returns {Promise<DeleteResult>}
  */
 async function deleteMessages(env, aliasAddress, detailId) {
   const popDeleted = await deleteMessagesViaPop3(env, aliasAddress, detailId);
   const imapEnabled = String(env.QQ_IMAP_DELETE || "1") !== "0";
+  /** @type {ImapDeleteResult} */
   let imapResult = { ok: false, deleted: 0, messages: [], error: "skipped" };
 
   if (imapEnabled && popDeleted.length) {
@@ -701,7 +734,7 @@ async function deleteMessages(env, aliasAddress, detailId) {
         ok: false,
         deleted: 0,
         messages: [],
-        error: error && error.message ? error.message : String(error),
+        error: errorMessage(error),
       };
     }
   } else if (imapEnabled && !popDeleted.length) {
@@ -753,19 +786,23 @@ async function handleMails(request, env, path) {
   if (request.method === "DELETE") {
     if (!detailId) return jsonResponse({ error: "missing mail id" }, 400);
     const result = await deleteMessages(env, aliasAddress, detailId);
-    const messages = Array.isArray(result?.messages) ? result.messages : [];
-    const imap = result?.imap || {};
-    // pop3 命中即视为接口成功；imap 失败时仍返回详情，便于排查网页端残留
+    const messages = Array.isArray(result.messages) ? result.messages : [];
+    // 默认值必须带齐字段；用 || {} 会变成 X|{}，访问 .ok 触发 TS2339
+    const pop3 = result.pop3 || { ok: false, deleted: 0 };
+    const imap = result.imap || { ok: false, deleted: 0, error: "", messages: [] };
     return jsonResponse(
       {
         ok: messages.length > 0,
         deleted: messages.length,
         requestedId: detailId,
         messages,
-        pop3: result?.pop3 || { ok: messages.length > 0, deleted: messages.length },
+        pop3: {
+          ok: Boolean(pop3.ok),
+          deleted: Number(pop3.deleted) || 0,
+        },
         imap: {
           ok: Boolean(imap.ok),
-          deleted: Number(imap.deleted || 0) || 0,
+          deleted: Number(imap.deleted) || 0,
           error: String(imap.error || ""),
           messages: Array.isArray(imap.messages) ? imap.messages : [],
         },
@@ -798,7 +835,7 @@ export default {
       }
       return new Response("Path Not Found", { status: 404 });
     } catch (error) {
-      return jsonResponse({ error: String(error?.message || error) }, 500);
+      return jsonResponse({ error: errorMessage(error) }, 500);
     }
   },
 };
