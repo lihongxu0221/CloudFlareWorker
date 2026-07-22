@@ -1,6 +1,6 @@
 # Cloudflare Git / wrangler deploy 使用本文件（可提交仓库）
 # 密钥请用 Dashboard Secrets 或 wrangler secret put，切勿写入本文件
-name = "grokreg"
+name = "grokreg2"
 main = "grokreg.worker.js"
 compatibility_date = "2024-11-01"
 
