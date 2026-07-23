@@ -1,0 +1,12 @@
+# 本地开发密钥模板：复制为 .dev.vars 后填写真实值
+#   copy .dev.vars.example .dev.vars
+# .dev.vars 已被 .gitignore 忽略，切勿提交。
+#
+# wrangler dev 会自动加载本文件中的变量（覆盖/补充 wrangler.toml [vars]）。
+
+# QQ 邮箱账号与授权码（测 /api/mails 收信/删信时必填）
+QQ_MAIL_USER=123456789@qq.com
+QQ_MAIL_AUTH_CODE=your-qq-auth-code
+
+# 中继共享密钥（本地测代理池时，主 Worker 与中继 Worker 须一致）
+RELAY_AUTH=local-relay-secret

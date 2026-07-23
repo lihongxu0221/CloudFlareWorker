@@ -4,7 +4,10 @@
  */
 
 interface Env {
+  // 域名池：换行/逗号/分号分隔多个域名；单域名向后兼容
   DOMAIN?: string;
+  // 选域策略：round_robin | random | hash
+  DOMAIN_SELECTION?: string;
   QQ_MAIL_USER?: string;
   QQ_MAIL_ACCOUNT?: string;
   QQ_MAIL_AUTH_CODE?: string;
@@ -18,6 +21,13 @@ interface Env {
   QQ_IMAP_DELETE?: string;
   QQ_FETCH_LIMIT?: string | number;
   QQ_STRICT_ALIAS_MATCH?: string;
+  // 中继代理池（可选）
+  PROXY_POOL?: string;
+  PROXY_SELECTION?: string;
+  PROXY_TIMEOUT_MS?: string;
+  PROXY_RETRY?: string;
+  RELAY_AUTH?: string;
+  PROXY_FALLBACK_DIRECT?: string;
 }
 
 interface ExportedHandler<Env = unknown> {

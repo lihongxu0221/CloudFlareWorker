@@ -6,7 +6,13 @@ main = "grokreg.worker.js"
 compatibility_date = "2024-11-01"
 
 [vars]
-DOMAIN = "mail.example.com"
+# 域名池：支持换行 / 逗号 / 分号分隔多个域名；单域名向后兼容
+DOMAIN = """
+mail.example.com
+alias.example.org
+"""
+DOMAIN_SELECTION = "round_robin"
+
 QQ_MAIL_HOST = "pop.qq.com"
 QQ_MAIL_PORT = "995"
 QQ_IMAP_HOST = "imap.qq.com"
@@ -17,12 +23,25 @@ QQ_FETCH_LIMIT = "20"
 # 并发多账号注册时建议取消下一行注释
 # QQ_STRICT_ALIAS_MATCH = "1"
 
+# ---------- 中继代理池（可选） ----------
+# PROXY_POOL = """
+# https://relay1.example.com|secret1
+# https://relay2.example.com|secret2
+# """
+# PROXY_SELECTION = "round_robin"
+# PROXY_TIMEOUT_MS = "15000"
+# PROXY_RETRY = "2"
+# RELAY_AUTH = "change-me-shared-secret"
+# PROXY_FALLBACK_DIRECT = "0"
+
 # 必填密钥（不要写在本文件）：
 #   wrangler secret put QQ_MAIL_USER
 #   wrangler secret put QQ_MAIL_AUTH_CODE
+#   wrangler secret put RELAY_AUTH        # 仅当启用 PROXY_POOL 时需要
 #
 # 兼容别名（二选一即可，与 Worker 代码一致）：
 #   QQ_MAIL_USER      ≡ QQ_MAIL_ACCOUNT
 #   QQ_MAIL_AUTH_CODE ≡ QQ_MAIL_PASSWORD
 #   QQ_IMAP_HOST      ≡ IMAP_HOST
 #   QQ_IMAP_PORT      ≡ IMAP_PORT
+

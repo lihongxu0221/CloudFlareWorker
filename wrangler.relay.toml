@@ -1,0 +1,13 @@
+# 中继 Worker 独立部署配置（拥有独立出口 IP）
+# 部署：npx wrangler deploy -c wrangler.relay.toml
+# 说明：主 Worker 通过 PROXY_POOL 调用本端点；RELAY_AUTH 须与主 Worker 的 RELAY_AUTH 一致。
+name = "grokreg-relay"
+main = "relay.worker.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+# 单任务内部超时(ms)
+RELAY_TIMEOUT_MS = "20000"
+
+# 必填密钥（不要写在本文件）：
+#   RELAY_AUTH   —— 调用方需通过请求头 x-relay-auth 携带，须与主 Worker 的 RELAY_AUTH 一致

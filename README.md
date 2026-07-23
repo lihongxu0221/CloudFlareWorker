@@ -15,6 +15,8 @@
 - 解析 MIME：Base64、Quoted-Printable、multipart、HTML 转纯文本
 - CORS 已开启，可直接被前端或脚本调用
 - 兼容多组路径别名，便于对接不同注册机
+- **域名池**：`DOMAIN` 支持换行/逗号/分号分隔的多个域名，生成地址时在池中按策略选域
+- **中继代理池（可选）**：将收件/删信任务分发给一组拥有独立出口 IP 的中继端点，抗封禁、可扩容
 
 ---
 
@@ -60,7 +62,8 @@
 
 | 变量名 | 必填 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `DOMAIN` | **是** | — | 临时邮箱域名，如 `mail.example.com` |
+| `DOMAIN` | **是** | — | **域名池**：临时邮箱域名，可换行/逗号/分号分隔多个（如 `a.com`\nb.com）；单域名向后兼容 |
+| `DOMAIN_SELECTION` | 否 | `round_robin` | 选域策略：`round_robin` / `random` / `hash` |
 | `QQ_MAIL_USER` | **是** | — | QQ 邮箱账号，如 `123456789@qq.com` |
 | `QQ_MAIL_AUTH_CODE` | **是** | — | QQ 邮箱授权码（POP3/IMAP 共用，非登录密码） |
 | `QQ_MAIL_HOST` | 否 | `pop.qq.com` | POP3 服务器 |
@@ -70,6 +73,12 @@
 | `QQ_IMAP_DELETE` | 否 | `1` | 设为 `0` 关闭 IMAP 删信，仅走 POP3 DELE |
 | `QQ_FETCH_LIMIT` | 否 | `20` | 默认拉取邮件条数（最大 50） |
 | `QQ_STRICT_ALIAS_MATCH` | 否 | 空 | 设为 `1` 时严格按收件人别名过滤；并发注册建议开启 |
+| `PROXY_POOL` | 否 | 空 | **中继代理池**：换行/逗号分隔的中继 URL，可 `url\|secret` 指定条目密钥；为空则本地直连 |
+| `PROXY_SELECTION` | 否 | `round_robin` | 代理调度：`round_robin` / `random` / `least_failures` |
+| `PROXY_TIMEOUT_MS` | 否 | `15000` | 单中继超时（毫秒） |
+| `PROXY_RETRY` | 否 | `2` | 失败后重试的中继数 |
+| `RELAY_AUTH` | 否* | 空 | 调用中继的共享密钥（`PROXY_POOL` 非空时必填，须与各 `relay.worker.js` 的 `RELAY_AUTH` 一致） |
+| `PROXY_FALLBACK_DIRECT` | 否 | `0` | 所有中继失败是否回退本地直连：`1` 开启 / `0` 关闭 |
 
 兼容别名（任选其一即可）：
 
@@ -153,11 +162,41 @@ wrangler secret put QQ_MAIL_AUTH_CODE
 wrangler deploy
 ```
 
-本地调试：
+### 本地开发与测试
 
-```bash
-wrangler dev
+不依赖线上部署，可在本机验证域名池与 API：
+
+```powershell
+# 1. 准备本地密钥（勿提交）
+Copy-Item .dev.vars.example .dev.vars
+# 编辑 .dev.vars：测收信时填写 QQ_MAIL_USER / QQ_MAIL_AUTH_CODE
+
+# 2. 启动主 Worker（默认 http://127.0.0.1:8787）
+npx wrangler@4 dev --port 8787 --ip 127.0.0.1 --local
+# 或一键脚本：
+# .\scripts\local-dev.ps1
+# .\scripts\local-dev.ps1 -WithRelay          # 主 :8787 + 中继 :8788
+# .\scripts\local-dev.ps1 -Smoke              # 启动后自动冒烟
+
+# 3. 另开终端跑冒烟（域名池 / 生成地址 / token，不依赖 QQ 凭据）
+powershell -File scripts/local-smoke.ps1
+# 有 QQ 凭据时再测收信：
+# powershell -File scripts/local-smoke.ps1 -WithMail
 ```
+
+| 脚本 | 说明 |
+|------|------|
+| `scripts/local-dev.ps1` | 启动 `wrangler dev`；`-WithRelay` 联调中继；`-Smoke` 启动后冒烟 |
+| `scripts/local-smoke.ps1` | 健康检查、域名池、`new_address`、token；可选 `-WithMail` |
+
+说明：
+
+- `DOMAIN` 等非敏感项来自 `wrangler.toml`；密钥来自 `.dev.vars`
+- 动态域名生成（`/api/domains`、`/api/new_address`）**无需** QQ 凭据即可测
+- 收信/删信需真实 `QQ_MAIL_*`，且本机需能出站连接 `pop.qq.com` / `imap.qq.com`
+- 停止：前台 `Ctrl+C`；后台 job 用 `Get-Job | Stop-Job; Get-Job | Remove-Job`
+
+更细步骤见 [Deploy.md](./Deploy.md)「本地开发与测试」。
 
 ---
 
@@ -211,12 +250,14 @@ curl -X POST "https://你的worker.workers.dev/api/new_address" \
 ```json
 {
   "address": "testuser@mail.example.com",
-  "token": "testuser",
-  "jwt": "testuser"
+  "token": "testuser.0",
+  "jwt": "testuser.0",
+  "domain": "mail.example.com",
+  "domainIndex": 0
 }
 ```
 
-> `token` / `jwt` 实际为邮箱本地部分，后续读信时作为身份标识使用。
+> `token` / `jwt`：单域名时为本地部分（如 `testuser`）；**域名池**时为 `本地部分.域名下标`（如 `testuser.0`），下标对应该地址所用域名在 `DOMAIN` 中的序号，便于无状态取信。客户端透传 token 即可，无需关心格式。响应同时返回 `domain` 与 `domainIndex` 方便调试。
 
 ### 3. 获取 Token
 
@@ -398,6 +439,62 @@ console.log(created.address, mails.messages);
 
 ---
 
+## 域名池与中继代理池
+
+### 1. 域名池（DOMAIN）
+
+把 `DOMAIN` 配成多行（或用逗号/分号分隔）即启用域名池：
+
+```toml
+[vars]
+DOMAIN = """
+a.com
+b.com
+c.com
+"""
+# 选域策略：round_robin(默认) | random | hash
+DOMAIN_SELECTION = "round_robin"
+```
+
+- 每次 `POST /api/new_address` 会在池中轮流/随机/按哈希选一个域名，返回完整 `address` 与带域名下标的 `token`。
+- **取信/删信无需存储**：token 形如 `localpart.N`，`N` 即域名在池中的下标；Worker 解码后直接用对应域名重建地址。
+- 单域名（旧配置）行为完全不变；旧的无下标 token 在多域名下会自动遍历各域名尝试匹配（兼容历史地址）。
+- **扩容注意**：向 `DOMAIN` 末尾**追加**域名不会使已有下标失效；若重排/删除已被使用的域名，对应旧 token 会取不到信（用末尾追加即可避免）。
+
+### 2. 中继代理池（PROXY_POOL）
+
+Cloudflare Workers 的出站 TCP（`cloudflare:sockets`）**不支持直连外部 SOCKS5/HTTP 代理**，且其 `startTls()` 只能对最初连接的目标做 TLS，无法在代理隧道上叠加端到端 TLS。因此改用**中继模型**：把收件/删信任务通过 `fetch` 分发给一组独立部署的中继端点，由中继用自己的出口 IP 完成 IMAP/POP3+TLS。
+
+```toml
+[vars]
+PROXY_POOL = """
+https://relay1.example.com|secret1
+https://relay2.example.com|secret2
+"""
+PROXY_SELECTION = "round_robin"   # round_robin | random | least_failures
+PROXY_TIMEOUT_MS = "15000"
+PROXY_RETRY = "2"
+RELAY_AUTH = "共享密钥"            # 也可每条目用 url|secret 指定
+PROXY_FALLBACK_DIRECT = "0"       # 1 = 全部中继失败回退本地直连
+```
+
+- 中继端点由 `relay.worker.js` 独立部署（见 `wrangler.relay.toml`），每个实例拥有独立出口 IP。
+- 调用时主 Worker 在请求头携带 `x-relay-auth`，中继校验通过后才执行收件/删信并仅回传邮件 JSON（**不回显密码**）。
+- 调度与重试：按 `PROXY_SELECTION` 选中继 → `fetch` 任务 → 失败/超时自动轮换下一中继，最多 `PROXY_RETRY` 次；全部失败且 `PROXY_FALLBACK_DIRECT=1` 时回退本地直连。
+- 未配置 `PROXY_POOL` 时退化为本地直连（与改造前完全一致）。
+
+部署中继：
+
+```bash
+npx wrangler deploy -c wrangler.relay.toml
+# 记得为 relay worker 设置密钥 RELAY_AUTH（须与主 Worker 的 RELAY_AUTH 一致）
+wrangler secret put RELAY_AUTH -c wrangler.relay.toml
+```
+
+一键脚本亦支持：`deploy.ps1 -WithRelay` / `./deploy.sh --with-relay`（会写入 `PROXY_POOL`、注入 `RELAY_AUTH`、部署并重部署主 Worker）。
+
+---
+
 ## 常见问题
 
 ### 1. 返回 `缺少 DOMAIN 环境变量`
@@ -447,11 +544,18 @@ console.log(created.address, mails.messages);
 
 ```
 CloudFlareWorker/
-├── grokreg.worker.js         # Worker 主代码
-├── wrangler.toml             # 生产/Git 部署配置（可提交，无密钥）
-├── wrangler.toml.example     # Wrangler 配置模板
-├── deploy.ps1                # Windows 一键部署
-├── deploy.sh                 # Linux/macOS 一键部署
+├── grokreg.worker.js         # 主 Worker：域名池选域 + 代理池调度分发
+├── mailbox.js                # 共享邮箱模块：IMAP/POP3 与 MIME 解析（主/中继共用）
+├── relay.worker.js           # 中继端点：独立出口 IP，执行收件/删信
+├── wrangler.toml             # 主 Worker 部署配置（可提交，无密钥）
+├── wrangler.relay.toml       # 中继 Worker 部署配置
+├── wrangler.toml.example     # 主 Worker 配置模板
+├── .dev.vars.example         # 本地密钥模板（复制为 .dev.vars）
+├── scripts/
+│   ├── local-dev.ps1         # 一键启动本地 wrangler dev
+│   └── local-smoke.ps1       # 本地冒烟（域名池 / 可选收信）
+├── deploy.ps1                # Windows 一键部署（支持 -WithRelay）
+├── deploy.sh                 # Linux/macOS 一键部署（支持 --with-relay）
 ├── Deploy.md                 # 详细部署说明
 ├── README.md                 # 说明文档
 └── LICENSE                   # MIT

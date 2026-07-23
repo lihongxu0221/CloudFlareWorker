@@ -17,6 +17,8 @@
 #   --qq-user USER
 #   --qq-auth CODE   # POP3/IMAP 共用授权码
 #   --name WORKER_NAME
+#   --relay-auth AUTH   # 中继共享密钥 RELAY_AUTH
+#   --with-relay        # 一并部署中继 Worker 并写入 PROXY_POOL / RELAY_AUTH
 #   --strict
 #   --skip-login
 #   --skip-secrets
@@ -32,6 +34,8 @@ DOMAIN="${DOMAIN:-}"
 QQ_MAIL_USER="${QQ_MAIL_USER:-${QQ_MAIL_ACCOUNT:-}}"
 QQ_MAIL_AUTH_CODE="${QQ_MAIL_AUTH_CODE:-${QQ_MAIL_PASSWORD:-}}"
 WORKER_NAME="${WORKER_NAME:-grokreg-mail}"
+RELAY_AUTH="${RELAY_AUTH:-}"
+WITH_RELAY=0
 STRICT_ALIAS=0
 SKIP_LOGIN=0
 SKIP_SECRETS=0
@@ -59,6 +63,8 @@ while [[ $# -gt 0 ]]; do
     --qq-auth) QQ_MAIL_AUTH_CODE="$2"; shift 2 ;;
     --name) WORKER_NAME="$2"; shift 2 ;;
     --strict) STRICT_ALIAS=1; shift ;;
+    --relay-auth) RELAY_AUTH="$2"; shift 2 ;;
+    --with-relay) WITH_RELAY=1; shift ;;
     --skip-login) SKIP_LOGIN=1; shift ;;
     --skip-secrets) SKIP_SECRETS=1; shift ;;
     --skip-deploy) SKIP_DEPLOY=1; shift ;;
@@ -112,6 +118,34 @@ normalize_secret() {
   v="${v//$'\r'/}"
   v="${v//$'\n'/}"
   printf '%s' "$v"
+}
+
+update_wrangler_proxy() {
+  local path="$1"
+  local value="$2"
+  local lines
+  lines="$(printf '%s' "$value" | tr ',;' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')"
+  if [[ -z "$lines" ]]; then
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$path" "$value" <<'PY'
+import sys, re
+path, value = sys.argv[1], sys.argv[2]
+lines = [l.strip() for l in re.split(r'[,;\r\n]', value) if l.strip()]
+block = 'PROXY_POOL = """\n' + '\n'.join(lines) + '\n"""'
+s = open(path, encoding='utf-8').read()
+if re.search(r'(?s)PROXY_POOL\s*=\s*""".*?"""', s):
+    s = re.sub(r'(?s)PROXY_POOL\s*=\s*""".*?"""', block, s, count=1)
+elif re.search(r'(?m)^#\s*PROXY_POOL', s):
+    s = re.sub(r'(?m)^#\s*PROXY_POOL.*', block, s, count=1)
+else:
+    s = s.rstrip() + '\n' + block + '\n'
+open(path, 'w', encoding='utf-8').write(s)
+PY
+  else
+    warn "未检测到 python3，无法自动写入 PROXY_POOL；请在 wrangler.toml 中手动取消注释 PROXY_POOL 并填入中继 URL"
+  fi
 }
 
 update_wrangler_toml() {
@@ -305,6 +339,51 @@ if [[ $DEPLOY_RC -ne 0 ]]; then
   exit 1
 fi
 ok "部署命令已执行"
+
+if [[ "$WITH_RELAY" -eq 1 ]]; then
+  step "部署中继 Worker (relay)"
+  if [[ -z "$RELAY_AUTH" ]]; then
+    RELAY_AUTH="$(prompt "中继共享密钥 RELAY_AUTH" "")"
+  fi
+  RELAY_AUTH="$(normalize_secret "$RELAY_AUTH")"
+  if [[ -z "$RELAY_AUTH" ]]; then
+    fail "RELAY_AUTH 不能为空（启用代理池必需）"
+    exit 1
+  fi
+
+  PROXY_INPUT="$(prompt "中继端点 URL（多个用逗号/换行分隔，可留空稍后手动配置 PROXY_POOL）" "")"
+  PROXY_WRITTEN=0
+  if [[ -n "$PROXY_INPUT" ]]; then
+    update_wrangler_proxy "wrangler.toml" "$PROXY_INPUT"
+    ok "已写入主 Worker 的 PROXY_POOL"
+    PROXY_WRITTEN=1
+  fi
+
+  printf '%s' "$RELAY_AUTH" | run_wrangler secret put RELAY_AUTH
+  ok "主 Worker RELAY_AUTH"
+  printf '%s' "$RELAY_AUTH" | run_wrangler secret put RELAY_AUTH -c wrangler.relay.toml
+  ok "中继 Worker RELAY_AUTH"
+
+  if [[ ! -f relay.worker.js ]]; then
+    warn "未找到 relay.worker.js，跳过中继部署"
+  else
+    set +e
+    if printf 'y\n' | run_wrangler deploy -c wrangler.relay.toml 2>&1 | tee "$DEPLOY_LOG"; then
+      ok "中继 Worker 部署完成"
+    else
+      warn "中继 Worker 部署失败，请手动: npx wrangler deploy -c wrangler.relay.toml"
+    fi
+    set -e
+
+    if [[ "$PROXY_WRITTEN" -eq 1 ]]; then
+      step "重新部署主 Worker 以生效 PROXY_POOL"
+      set +e
+      printf 'y\n' | run_wrangler deploy 2>&1 | tee "$DEPLOY_LOG"
+      set -e
+      ok "主 Worker 重新部署完成"
+    fi
+  fi
+fi
 
 step "冒烟测试 /api/domains"
 BASE_URL="$(grep -Eo 'https://[a-zA-Z0-9._-]+\.workers\.dev' "$DEPLOY_LOG" | head -n1 || true)"

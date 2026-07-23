@@ -48,6 +48,8 @@ param(
   [string]$QqUser = $(if ($env:QQ_MAIL_USER) { $env:QQ_MAIL_USER } else { $env:QQ_MAIL_ACCOUNT }),
   [string]$QqAuthCode = $(if ($env:QQ_MAIL_AUTH_CODE) { $env:QQ_MAIL_AUTH_CODE } else { $env:QQ_MAIL_PASSWORD }),
   [string]$WorkerName = $(if ($env:WORKER_NAME) { $env:WORKER_NAME } else { "grokreg-mail" }),
+  [string]$RelayAuth = $env:RELAY_AUTH,
+  [switch]$WithRelay,
   [switch]$StrictAlias,
   [switch]$SkipLogin,
   [switch]$SkipSecrets,
@@ -150,6 +152,26 @@ function Update-WranglerToml {
   [System.IO.File]::WriteAllText($Path, $content, $utf8NoBom)
 }
 
+function Update-ProxyPool {
+  param(
+    [string]$Path,
+    [string]$Value
+  )
+  $content = Get-Content -Path $Path -Raw -Encoding UTF8
+  $lines = $Value -split '[,;\r\n]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+  if (-not $lines) { return }
+  $block = "PROXY_POOL = """ + $NL + ($lines -join $NL) + $NL + """"
+  if ($content -match '(?s)PROXY_POOL\s*=\s*""".*?"""') {
+    $content = [regex]::Replace($content, '(?s)PROXY_POOL\s*=\s*""".*?"""', $block)
+  } elseif ($content -match '(?m)^#\s*PROXY_POOL') {
+    $content = [regex]::Replace($content, '(?m)^#\s*PROXY_POOL.*', $block, 1)
+  } else {
+    $content = $content.TrimEnd() + $NL + $block + $NL
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::WriteAllText($Path, $content, $utf8NoBom)
+}
+
 function Invoke-Wrangler {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$WranglerArgs)
   if (Test-CommandExists "wrangler") {
@@ -183,7 +205,8 @@ function Normalize-SecretValue {
 function Invoke-WranglerSecretPut {
   param(
     [string]$Name,
-    [string]$Value
+    [string]$Value,
+    [string]$Config = ""
   )
   # PowerShell 的 `$Value | wrangler secret put` 在 Windows 上不可靠：
   # 1) 管道到 .cmd 时 stdin 常丢失；2) 可能附带 \r\n，导致 QQ 授权码鉴权失败。
@@ -194,6 +217,7 @@ function Invoke-WranglerSecretPut {
   } else {
     "wrangler secret put $Name"
   }
+  if ($Config) { $inner = "$inner -c $Config" }
 
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $env:ComSpec
@@ -221,7 +245,8 @@ function Invoke-WranglerSecretPut {
 function Set-WranglerSecret {
   param(
     [string]$Name,
-    [string]$Value
+    [string]$Value,
+    [string]$Config = ""
   )
   $clean = Normalize-SecretValue $Value
   if ([string]::IsNullOrWhiteSpace($clean)) {
@@ -236,7 +261,7 @@ function Set-WranglerSecret {
   } else {
     Write-Host ("    写入 $Name") -ForegroundColor DarkGray
   }
-  Invoke-WranglerSecretPut -Name $Name -Value $clean
+  Invoke-WranglerSecretPut -Name $Name -Value $clean -Config $Config
 }
 
 Write-Host ""
@@ -413,6 +438,55 @@ try {
   exit 1
 }
 Write-Ok "部署命令已执行"
+
+if ($WithRelay) {
+  Write-Step "部署中继 Worker (relay)"
+  if ([string]::IsNullOrWhiteSpace($RelayAuth)) {
+    $RelayAuth = Get-InputValue -Prompt "中继共享密钥 RELAY_AUTH"
+  }
+  $RelayAuth = Normalize-SecretValue $RelayAuth
+  if ([string]::IsNullOrWhiteSpace($RelayAuth)) {
+    throw "RELAY_AUTH 不能为空（启用代理池必需）"
+  }
+
+  $proxyInput = Get-InputValue -Prompt "中继端点 URL（多个用逗号/换行分隔，可留空稍后手动配置 PROXY_POOL）" -Default ""
+  $proxyWritten = $false
+  if ($proxyInput) {
+    Update-ProxyPool -Path $wranglerToml -Value $proxyInput
+    Write-Ok "已写入主 Worker 的 PROXY_POOL"
+    $proxyWritten = $true
+  }
+
+  Set-WranglerSecret -Name "RELAY_AUTH" -Value $RelayAuth
+  Write-Ok "主 Worker RELAY_AUTH"
+  Set-WranglerSecret -Name "RELAY_AUTH" -Value $RelayAuth -Config "wrangler.relay.toml"
+  Write-Ok "中继 Worker RELAY_AUTH"
+
+  if (-not (Test-Path (Join-Path $Root "relay.worker.js"))) {
+    Write-Warn "未找到 relay.worker.js，跳过中继部署"
+  } else {
+    if (Test-CommandExists "wrangler") {
+      cmd /c "echo y| wrangler deploy -c wrangler.relay.toml" 2>&1 | Tee-Object -FilePath $deployLog
+    } else {
+      cmd /c "echo y| npx --yes wrangler@4 deploy -c wrangler.relay.toml" 2>&1 | Tee-Object -FilePath $deployLog
+    }
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warn "中继 Worker 部署失败，请手动: npx wrangler deploy -c wrangler.relay.toml"
+    } else {
+      Write-Ok "中继 Worker 部署完成"
+    }
+
+    if ($proxyWritten) {
+      Write-Step "重新部署主 Worker 以生效 PROXY_POOL"
+      if (Test-CommandExists "wrangler") {
+        cmd /c "echo y| wrangler deploy" 2>&1 | Tee-Object -FilePath $deployLog
+      } else {
+        cmd /c "echo y| npx --yes wrangler@4 deploy" 2>&1 | Tee-Object -FilePath $deployLog
+      }
+      Write-Ok "主 Worker 重新部署完成"
+    }
+  }
+}
 
 Write-Step "冒烟测试 /api/domains"
 $logText = if (Test-Path $deployLog) { Get-Content $deployLog -Raw -Encoding UTF8 } else { "" }

@@ -73,6 +73,11 @@ web_modules/
 # Local secrets only (wrangler.toml 可提交，勿写入授权码)
 .dev.vars
 
+# 本地 dev 自动生成的配置（scripts/local-dev.ps1）
+wrangler.local.toml
+wrangler.relay.local.toml
+.wrangler/
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

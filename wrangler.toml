@@ -5,7 +5,31 @@ main = "grokreg.worker.js"
 compatibility_date = "2024-11-01"
 
 [vars]
-DOMAIN = "juc114.cn"
+# 域名池：支持换行 / 逗号 / 分号分隔多个域名；单域名向后兼容。
+# 生成地址时按 DOMAIN_SELECTION 策略选域，token 内编码域名下标以便无状态取信。
+DOMAIN = """
+juc114.cn
+register.juc114.cn
+juc114.de5.net
+otc.juc114.de5.net
+jjt.juc114.de5.net
+youtube.juc114.de5.net
+cat.juc114.de5.net
+ju114.de5.net
+uto.ju114.de5.net
+anyrouter.ju114.de5.net
+plana.ju114.de5.net
+baigu.cc.cd
+lily.baigu.cc.cd
+male.baigu.cc.cd
+famale.baigu.cc.cd
+mark.baigu.cc.cd
+xai.baigu.cc.cd
+showmaker.baigu.cc.cd
+"""
+# 选域策略：round_robin(默认) | random | hash
+DOMAIN_SELECTION = "round_robin"
+
 QQ_MAIL_HOST = "pop.qq.com"
 QQ_MAIL_PORT = "995"
 QQ_IMAP_HOST = "imap.qq.com"
@@ -15,6 +39,25 @@ QQ_IMAP_PORT = "993"
 QQ_FETCH_LIMIT = "20"
 # 并发多账号注册时建议取消下一行注释
 # QQ_STRICT_ALIAS_MATCH = "1"
+
+# ---------- 中继代理池（可选） ----------
+# 多个中继端点各自拥有独立出口 IP，主 Worker 轮换调用以抗封禁。
+# 条目格式：https://host/path 或 https://host/path|secret（条目 secret 优先于下方 RELAY_AUTH）。
+# 不配置 PROXY_POOL 时退化为本地直连（与改造前完全一致）。
+# PROXY_POOL = """
+# https://relay1.example.com|secret1
+# https://relay2.example.com|secret2
+# """
+# 代理调度：round_robin(默认) | random | least_failures
+# PROXY_SELECTION = "round_robin"
+# 单中继超时(ms)
+# PROXY_TIMEOUT_MS = "15000"
+# 失败重试中继数
+# PROXY_RETRY = "2"
+# 调用中继的共享密钥（须与各 relay.worker.js 的 RELAY_AUTH 一致）
+# RELAY_AUTH = "change-me-shared-secret"
+# 所有中继失败是否回退本地直连：1 开启 / 0 关闭(默认)
+# PROXY_FALLBACK_DIRECT = "0"
 
 # 必填密钥（不要写在本文件）：
 #   QQ_MAIL_USER
