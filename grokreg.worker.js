@@ -304,7 +304,17 @@ async function runDelete(env, aliasAddress, detailId) {
 // 路由处理
 // ---------------------------------------------------------------------------
 
-async function handleMails(request, env, path) {
+/**
+ * 解析邮件路由：支持 /api/mails、/api/mail、/mails、/mail，以及 /{id} 路径参数。
+ * @returns {{ base: string, detailId: string } | null}
+ */
+function matchMailRoute(path) {
+  const m = String(path || "").match(/^\/(?:api\/)?mails?(?:\/([^/]+))?$/);
+  if (!m) return null;
+  return { base: m[0], detailId: m[1] ? decodeURIComponent(m[1]) : "" };
+}
+
+async function handleMails(request, env, pathDetailId = "") {
   const url = new URL(request.url);
   const body = request.method === "POST" || request.method === "DELETE" ? await readJson(request) : {};
   const token = tokenFromRequest(request, body);
@@ -315,7 +325,14 @@ async function handleMails(request, env, path) {
   const decoded = decodeToken(token, env);
   const limit = Number(url.searchParams.get("limit") || body.limit || env.QQ_FETCH_LIMIT || DEFAULT_FETCH_LIMIT) || DEFAULT_FETCH_LIMIT;
   const offset = Number(url.searchParams.get("offset") || body.offset || 0) || 0;
-  const detailId = url.searchParams.get("detailId") || body.detailId || "";
+  // 优先级：路径 /api/mail/{id} > query detailId/id > body detailId/id
+  const detailId =
+    String(pathDetailId || "").trim() ||
+    url.searchParams.get("detailId") ||
+    url.searchParams.get("id") ||
+    body.detailId ||
+    body.id ||
+    "";
 
   const aliases = decoded.domain
     ? [{ domain: decoded.domain }]
@@ -323,7 +340,7 @@ async function handleMails(request, env, path) {
 
   if (request.method === "DELETE") {
     if (!detailId) {
-      return jsonResponse({ error: "缺少 detailId，无法删除指定邮件" }, 400);
+      return jsonResponse({ error: "缺少邮件 id（路径 /api/mail/{id} 或 ?detailId=）" }, 400);
     }
     let lastResult = null;
     for (const alias of aliases) {
@@ -332,15 +349,28 @@ async function handleMails(request, env, path) {
       lastResult = result;
       if (result && Array.isArray(result.messages) && result.messages.length) {
         return jsonResponse({
+          ok: true,
+          deleted: result.messages.length,
+          requestedId: detailId,
           message: `已删除 ${result.messages.length} 封邮件（POP3 ${result.pop3?.deleted || 0} 封，IMAP ${result.imap?.deleted || 0} 封）`,
+          messages: result.messages,
+          pop3: result.pop3,
+          imap: result.imap,
           data: result,
         });
       }
     }
-    return jsonResponse({
-      message: "未找到匹配邮件",
-      data: lastResult,
-    });
+    return jsonResponse(
+      {
+        ok: false,
+        deleted: 0,
+        requestedId: detailId,
+        message: "未找到匹配邮件",
+        error: "未找到该邮件或无权访问",
+        data: lastResult,
+      },
+      404
+    );
   }
 
   let messages = [];
@@ -357,7 +387,9 @@ async function handleMails(request, env, path) {
     messages = await runFetch(env, `${decoded.localPart}@${aliases[0].domain}`, detailId, limit, offset);
   }
 
-  const list = detailId ? messages.filter((m) => String(m.id) === detailId) : messages;
+  const list = detailId
+    ? messages.filter((m) => String(m.id) === detailId || String(m.msgid) === detailId || String(m.number) === detailId)
+    : messages;
   if (detailId && !list.length) {
     return jsonResponse({ error: "未找到该邮件或无权访问" }, 404);
   }
@@ -410,7 +442,7 @@ export default {
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
       return jsonResponse({
         service: "grokreg temporary email service",
-        endpoints: ["/health", "/api/new_address", "/api/token", "/api/mails", "/api/domains"],
+        endpoints: ["/health", "/api/new_address", "/api/token", "/api/mails", "/api/mail/{id}", "/api/domains"],
       });
     }
     if (url.pathname === "/health") {
@@ -419,8 +451,9 @@ export default {
 
     const path = normalizePath(url.pathname);
     try {
-      if (path === "/api/mails" || path === "/mails") {
-        return await handleMails(request, env, path);
+      const mailRoute = matchMailRoute(path);
+      if (mailRoute) {
+        return await handleMails(request, env, mailRoute.detailId);
       }
       if (path === "/api/new_address" || path === "/new_address" || path === "/api/address" || path === "/address") {
         return await handleNewAddress(request, env);
