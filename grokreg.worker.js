@@ -390,10 +390,24 @@ async function handleMails(request, env, pathDetailId = "") {
   const list = detailId
     ? messages.filter((m) => String(m.id) === detailId || String(m.msgid) === detailId || String(m.number) === detailId)
     : messages;
+  // 按 id 查询未命中时返回 200 空列表（删除后复查会走这里，不应 404 导致客户端误判失败）
   if (detailId && !list.length) {
-    return jsonResponse({ error: "未找到该邮件或无权访问" }, 404);
+    return jsonResponse({
+      ok: true,
+      found: false,
+      count: 0,
+      messages: [],
+      requestedId: detailId,
+      message: "未找到该邮件（可能已删除）",
+    });
   }
-  return jsonResponse({ count: list.length, messages: list });
+  return jsonResponse({
+    ok: true,
+    found: detailId ? true : undefined,
+    count: list.length,
+    messages: list,
+    requestedId: detailId || undefined,
+  });
 }
 
 async function handleNewAddress(request, env) {
